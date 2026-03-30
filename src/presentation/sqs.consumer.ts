@@ -72,7 +72,13 @@ export class OrderSQSConsumer {
   }
 
   private async processOrder(order: OrderEvent): Promise<void> {
-    logger.debug({ order }, 'Business logic processing');
+    logger.debug({ orderId: order.orderId }, 'Business logic processing started');
+    
+    if (order.amount > 1000) {
+      throw new Error('Simulated database failure for high-value orders');
+    }
+    
+    logger.info('Order successfully saved to database');
   }
 
   private sleep(ms: number): Promise<void> {
