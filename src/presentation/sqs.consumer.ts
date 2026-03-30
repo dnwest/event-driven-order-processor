@@ -47,8 +47,9 @@ export class OrderSQSConsumer {
 
   private async processMessage(message: Message): Promise<void> {
     try {
-      const body = JSON.parse(message.Body!);
-      const orderEvent = OrderEventSchema.parse(body);
+      const snsEnvelope = JSON.parse(message.Body!);
+      const payload = JSON.parse(snsEnvelope.Message);
+      const orderEvent = OrderEventSchema.parse(payload);
 
       logger.info({ orderId: orderEvent.orderId }, 'Processing order');
 
