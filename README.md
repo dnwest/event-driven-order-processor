@@ -1,11 +1,22 @@
 # 📨 Event-Driven Order Processor
 
-> A highly resilient, asynchronous order processing worker demonstrating production-grade Event-Driven Architecture (EDA) patterns using Node.js, AWS SQS/SNS, and LocalStack.
+> An asynchronous order-processing worker demonstrating core Event-Driven Architecture (EDA) patterns — SNS fan-out, SQS consumption, and Dead Letter Queues — with Node.js, AWS SQS/SNS, and LocalStack.
 
 ![Node.js](https://img.shields.io/badge/Node.js-18.x-green?style=for-the-badge&logo=node.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue?style=for-the-badge&logo=typescript)
 ![AWS](https://img.shields.io/badge/AWS-SQS%20%7C%20SNS-FF9900?style=for-the-badge&logo=amazon-aws)
 ![LocalStack](https://img.shields.io/badge/LocalStack-Cloud%20Emulator-085A87?style=for-the-badge&logo=localstack)
+![Status](https://img.shields.io/badge/status-in%20active%20development-yellow?style=for-the-badge)
+
+## 🚧 Project Status
+
+**In active development.** The core event-driven pipeline described below is fully
+implemented and runnable today on LocalStack. Production-hardening (circuit breaker,
+idempotency, real cloud IaC with IAM/encryption, automated tests) is planned and
+tracked in the **Roadmap** section below — those items are **targets, not yet shipped**.
+
+**Implemented today:** SNS → SQS fan-out · long-polling SQS consumer · Zod fail-fast
+validation · DLQ with `RedrivePolicy` (`maxReceiveCount=3`) · structured logging (Pino).
 
 ## 🎯 The Business Case
 
@@ -47,8 +58,21 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
-- **Infrastructure as Code (IaC):** Automated local AWS environment setup using bash scripts and LocalStack.
+- **Local environment automation:** A setup script provisions the SNS Topic, SQS Queue, and DLQ on LocalStack. _(Declarative IaC with Terraform is on the Roadmap below.)_
 - **Structured Logging:** Pino is used for high-performance, JSON-formatted observability.
+
+## 🗺️ Roadmap
+
+Planned to take this from a focused demo into a production-grade reference. These are
+**not implemented yet** — they are the intended target state (also reflected in the
+architecture diagram):
+
+- [ ] **Circuit Breaker** around the downstream call — fail fast when a dependency is down
+- [ ] **In-process retry with exponential backoff** for transient failures (today retry is SQS-native redelivery on a fixed visibility timeout)
+- [ ] **Idempotency** — dedupe re-delivered messages (at-least-once safety)
+- [ ] **Observability** — operational metrics (processed / failed / DLQ depth) + alerting thresholds
+- [ ] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM, encryption at rest (SSE/KMS), and VPC endpoints
+- [ ] **Automated tests + CI** — unit tests for the resilience behaviors, gated on every push
 
 ## 🚀 How to Run Locally
 
