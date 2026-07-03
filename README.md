@@ -11,12 +11,14 @@
 ## 🚧 Project Status
 
 **In active development.** The core event-driven pipeline described below is fully
-implemented and runnable today on LocalStack. Production-hardening (circuit breaker,
-idempotency, real cloud IaC with IAM/encryption, automated tests) is planned and
-tracked in the **Roadmap** section below — those items are **targets, not yet shipped**.
+implemented and runnable today on LocalStack. Remaining production-hardening
+(idempotency, real cloud IaC with IAM/encryption, in-process backoff, metrics) is
+planned and tracked in the **Roadmap** section below — those items are **targets,
+not yet shipped**.
 
 **Implemented today:** SNS → SQS fan-out · long-polling SQS consumer · Zod fail-fast
-validation · DLQ with `RedrivePolicy` (`maxReceiveCount=3`) · structured logging (Pino).
+validation · **circuit breaker** (opossum) on the downstream call · DLQ with
+`RedrivePolicy` (`maxReceiveCount=3`) · structured logging (Pino) · unit tests + CI.
 
 ## 🎯 The Business Case
 
@@ -55,6 +57,7 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 ## ✨ Key Engineering Patterns
 
 - **Event-Driven Design:** Complete decoupling of producers and consumers.
+- **Circuit Breaker:** The downstream call is wrapped with [opossum](https://github.com/nodeshift/opossum). Repeated failures **open** the circuit so the worker fails fast instead of hammering a dead dependency; while open, messages are not deleted, so they flow to redrive/DLQ. The breaker half-opens to probe recovery and closes once the dependency is healthy — every transition is logged.
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
@@ -67,7 +70,7 @@ Planned to take this from a focused demo into a production-grade reference. Thes
 **not implemented yet** — they are the intended target state (also reflected in the
 architecture diagram):
 
-- [ ] **Circuit Breaker** around the downstream call — fail fast when a dependency is down
+- [x] **Circuit Breaker** (opossum) around the downstream call — repeated failures open the circuit and the worker fails fast; while open, messages aren't deleted so they flow to redrive/DLQ. State transitions are logged.
 - [ ] **In-process retry with exponential backoff** for transient failures (today retry is SQS-native redelivery on a fixed visibility timeout)
 - [ ] **Idempotency** — dedupe re-delivered messages (at-least-once safety)
 - [ ] **Observability** — operational metrics (processed / failed / DLQ depth) + alerting thresholds
@@ -166,7 +169,8 @@ src/
 │   └── process-order.ts     # Injectable OrderHandler port (+ .spec.ts)
 ├── infrastructure/          # External integrations
 │   ├── aws/                 # SQS and SNS clients & publishers
-│   └── observability/       # Structured logging (Pino)
+│   ├── observability/       # Structured logging (Pino)
+│   └── resilience/          # Circuit breaker around the OrderHandler (+ .spec.ts)
 ├── presentation/            # Entrypoints
 │   └── sqs.consumer.ts      # The SQS polling engine (+ .spec.ts)
 ├── scripts/                 # Test producers
