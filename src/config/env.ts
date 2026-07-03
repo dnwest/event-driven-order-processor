@@ -7,7 +7,9 @@ const envSchema = z.object({
   AWS_ACCESS_KEY_ID: z.string().default('test'),
   AWS_SECRET_ACCESS_KEY: z.string().default('test'),
   AWS_ENDPOINT: z.string().default('http://localhost:4566'),
-  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  LOG_LEVEL: z
+    .enum(['debug', 'info', 'warn', 'error', 'silent'])
+    .default('info'),
 });
 
 export const env = envSchema.parse(process.env);
