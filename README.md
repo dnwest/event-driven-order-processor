@@ -38,7 +38,7 @@ This project demonstrates a **decoupled, asynchronous approach** where the core 
                               │            │ (Consumer)  │
                               │            └──────┬──────┘
                               │                   │
-                    ┌─────────┴────────┐    ┌──────▼──────┐
+                    ┌─────────┴────────┐    ┌─────▼───────┐
                     │   DLQ (orders-   │    │   Domain    │
                     │      dlq)        │    │   Logic     │
                     └──────────────────┘    └─────────────┘
@@ -72,7 +72,7 @@ architecture diagram):
 - [ ] **Idempotency** — dedupe re-delivered messages (at-least-once safety)
 - [ ] **Observability** — operational metrics (processed / failed / DLQ depth) + alerting thresholds
 - [ ] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM, encryption at rest (SSE/KMS), and VPC endpoints
-- [ ] **Automated tests + CI** — unit tests for the resilience behaviors, gated on every push
+- [x] **Automated tests + CI** — unit tests (Vitest) for validation and consumer message-handling semantics, with typecheck + tests gated on every push via GitHub Actions. More resilience-specific tests land alongside the features above.
 
 ## 🚀 How to Run Locally
 
@@ -113,6 +113,20 @@ pnpm run infra:down
 
 ## 🧪 Testing
 
+### Unit tests
+
+Fast, dependency-free unit tests run with [Vitest](https://vitest.dev) — no LocalStack
+or Docker required. They cover Zod validation and the consumer's message-handling
+semantics (delete-on-success; **leave-on-failure** so redrive/DLQ can take over).
+
+```bash
+pnpm test            # run once
+pnpm run test:watch  # watch mode
+pnpm run typecheck   # tsc --noEmit
+```
+
+CI (`.github/workflows/ci.yml`) runs `typecheck` + `test` on every push and pull request.
+
 ### Testing Success (Normal Order)
 
 1. Edit `src/scripts/publish-test-event.ts` - set `amount: 500.00`
@@ -147,37 +161,44 @@ awslocal sqs get-queue-attributes \
 ```
 src/
 ├── config/                  # Environment variables validation (Zod)
-├── domain/                  # Business entities and schemas (OrderEvent)
+├── domain/                  # Business entities, schemas & logic
+│   ├── order.schema.ts      # OrderEvent schema (+ .spec.ts)
+│   └── process-order.ts     # Injectable OrderHandler port (+ .spec.ts)
 ├── infrastructure/          # External integrations
 │   ├── aws/                 # SQS and SNS clients & publishers
 │   └── observability/       # Structured logging (Pino)
 ├── presentation/            # Entrypoints
-│   └── sqs.consumer.ts     # The SQS polling engine
+│   └── sqs.consumer.ts      # The SQS polling engine (+ .spec.ts)
 ├── scripts/                 # Test producers
 │   └── publish-test-event.ts
 └── index.ts                 # Worker bootstrap
+
+Tests are co-located as `*.spec.ts` next to the code they cover.
 ```
 
 ## ⚙️ Environment Variables
 
 The following environment variables are used (with defaults for local development):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SQS_QUEUE_URL` | `http://localhost:4566/000000000000/orders-queue` | Main SQS queue URL |
-| `SNS_TOPIC_ARN` | `arn:aws:sns:us-east-1:000000000000:order-events-topic` | SNS topic ARN |
-| `AWS_REGION` | `us-east-1` | AWS region |
-| `LOG_LEVEL` | `info` | Pino log level |
+| Variable        | Default                                                 | Description        |
+| --------------- | ------------------------------------------------------- | ------------------ |
+| `SQS_QUEUE_URL` | `http://localhost:4566/000000000000/orders-queue`       | Main SQS queue URL |
+| `SNS_TOPIC_ARN` | `arn:aws:sns:us-east-1:000000000000:order-events-topic` | SNS topic ARN      |
+| `AWS_REGION`    | `us-east-1`                                             | AWS region         |
+| `LOG_LEVEL`     | `info`                                                  | Pino log level     |
 
 ## 🔧 Troubleshooting
 
 ### Messages not being received?
+
 - Make sure LocalStack is running: `docker ps`
 - Check the queue exists: `awslocal sqs list-queues`
 
 ### Worker not processing?
+
 - Verify the SNS subscription: `awslocal sns list-subscriptions`
 
 ### DLQ not working?
+
 - Check the RedrivePolicy on the main queue (command above)
 - Verify the DLQ exists: `awslocal sqs get-queue-url --queue-name orders-dlq`
