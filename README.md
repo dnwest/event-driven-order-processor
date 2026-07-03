@@ -28,7 +28,7 @@ This project demonstrates a **decoupled, asynchronous approach** where the core 
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Client    │────▶│     API     │────▶│    SNS      │────▶│     SQS     │
+│   Client    │───▶│     API     │───▶│    SNS      │───▶│     SQS     │
 │ (Producer)  │     │ (Publisher) │     │   Topic     │     │   Queue     │
 └─────────────┘     └─────────────┘     └─────────────┘     └──────┬──────┘
                                                                    │
