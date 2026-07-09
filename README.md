@@ -6,20 +6,6 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue?style=for-the-badge&logo=typescript)
 ![AWS](https://img.shields.io/badge/AWS-SQS%20%7C%20SNS-FF9900?style=for-the-badge&logo=amazon-aws)
 ![LocalStack](https://img.shields.io/badge/LocalStack-Cloud%20Emulator-085A87?style=for-the-badge&logo=localstack)
-![Status](https://img.shields.io/badge/status-in%20active%20development-yellow?style=for-the-badge)
-
-## 🚧 Project Status
-
-**In active development.** The core event-driven pipeline described below is fully
-implemented and runnable today on LocalStack. Remaining production-hardening
-(real cloud IaC with IAM/encryption, in-process backoff, metrics) is planned and
-tracked in the **Roadmap** section below — those items are **targets, not yet
-shipped**.
-
-**Implemented today:** SNS → SQS fan-out · long-polling SQS consumer · Zod fail-fast
-validation · **circuit breaker** (opossum) on the downstream call · **idempotent
-dedupe** of re-delivered orders · DLQ with `RedrivePolicy` (`maxReceiveCount=3`) ·
-structured logging (Pino) · unit tests + CI.
 
 ## 🎯 The Business Case
 
@@ -58,26 +44,30 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 ## ✨ Key Engineering Patterns
 
 - **Event-Driven Design:** Complete decoupling of producers and consumers.
-- **Circuit Breaker:** The downstream call is wrapped with [opossum](https://github.com/nodeshift/opossum). Repeated failures **open** the circuit so the worker fails fast instead of hammering a dead dependency; while open, messages are not deleted, so they flow to redrive/DLQ. The breaker half-opens to probe recovery and closes once the dependency is healthy — every transition is logged.
+- **Circuit Breaker:** The downstream call is wrapped with [opossum](https://github.com/nodeshift/opossum). Repeated failures **open** the circuit so the worker fails fast instead of hammering a dead dependency; while open, messages are not deleted, so they flow to redrive/DLQ. The breaker half-opens to probe recovery and closes once the dependency is healthy. Every transition is logged.
 - **Idempotent Consumption:** SQS delivery is *at-least-once*, so the same order can arrive twice. Each `orderId` is recorded **after** it is successfully processed; a re-delivered duplicate is skipped as a logged no-op (and still acknowledged, removing it from the queue). Failed orders are left unrecorded so a retry reprocesses them.
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
-- **Local environment automation:** A setup script provisions the SNS Topic, SQS Queue, and DLQ on LocalStack. _(Declarative IaC with Terraform is on the Roadmap below.)_
+- **Local environment automation:** A setup script provisions the SNS Topic, SQS Queue, and DLQ on LocalStack.
 - **Structured Logging:** Pino is used for high-performance, JSON-formatted observability.
 
 ## 🗺️ Roadmap
 
-Planned to take this from a focused demo into a production-grade reference. These are
-**not implemented yet** — they are the intended target state (also reflected in the
-architecture diagram):
+A snapshot of the current stage. Checked items are implemented in this repo;
+unchecked items are the planned next steps, each building on a seam already in
+the code.
 
-- [x] **Circuit Breaker** (opossum) around the downstream call — repeated failures open the circuit and the worker fails fast; while open, messages aren't deleted so they flow to redrive/DLQ. State transitions are logged.
-- [ ] **In-process retry with exponential backoff** for transient failures (today retry is SQS-native redelivery on a fixed visibility timeout)
-- [x] **Idempotency** — dedupe re-delivered orders by `orderId` (at-least-once safety); recorded after success so failures are still retried. In-memory store for the demo, behind an async `IdempotencyStore` interface ready for Redis/DB.
-- [ ] **Observability** — operational metrics (processed / failed / DLQ depth) + alerting thresholds
-- [ ] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM, encryption at rest (SSE/KMS), and VPC endpoints
-- [x] **Automated tests + CI** — unit tests (Vitest) for validation and consumer message-handling semantics, with typecheck + tests gated on every push via GitHub Actions. More resilience-specific tests land alongside the features above.
+- [x] **Event-driven pipeline** — SNS fan-out → long-polling SQS consumer with fail-fast Zod validation.
+- [x] **Dead Letter Queue** — `RedrivePolicy` (`maxReceiveCount=3`) routes poison messages to `orders-dlq`.
+- [x] **Circuit Breaker** — opossum around the downstream call; opens on repeated failures so the worker fails fast.
+- [x] **Idempotent consumption** — re-delivered `orderId`s are deduped for at-least-once safety.
+- [x] **Structured logging** — JSON logs via Pino.
+- [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + tests).
+- [ ] **In-process retry with exponential backoff** for transient downstream failures.
+- [ ] **Redis-backed idempotency store** — the async `IdempotencyStore` interface exists so the in-memory store can be swapped for one shared across workers.
+- [ ] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (SSE/KMS).
+- [ ] **Operational metrics & alerting** — processed / failed / DLQ-depth counters with documented alert thresholds.
 
 ## 🚀 How to Run Locally
 
