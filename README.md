@@ -124,7 +124,7 @@ CI (`.github/workflows/ci.yml`) runs `typecheck` + `test` on every push and pull
 
 ### Testing Success (Normal Order)
 
-1. Edit `src/scripts/publish-test-event.ts` - set `amount: 500.00`
+1. Edit `src/scripts/publish-test-event.ts` and set `amount: 500.00`
 2. Run `pnpm run dev:publish`
 3. Watch the Worker process the order successfully
 
