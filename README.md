@@ -45,6 +45,7 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 
 - **Event-Driven Design:** Complete decoupling of producers and consumers.
 - **Circuit Breaker:** The downstream call is wrapped with [opossum](https://github.com/nodeshift/opossum). Repeated failures **open** the circuit so the worker fails fast instead of hammering a dead dependency; while open, messages are not deleted, so they flow to redrive/DLQ. The breaker half-opens to probe recovery and closes once the dependency is healthy. Every transition is logged.
+- **Retry with Backoff:** Transient downstream failures are retried in-process with exponential backoff and jitter before the message is surrendered to SQS. Retries run **inside** the circuit breaker, so it sees the final outcome; deterministic failures (e.g. validation) fail fast and are not retried.
 - **Idempotent Consumption:** SQS delivery is *at-least-once*, so the same order can arrive twice. Each `orderId` is recorded **after** it is successfully processed; a re-delivered duplicate is skipped as a logged no-op (and still acknowledged, removing it from the queue). Failed orders are left unrecorded so a retry reprocesses them.
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
@@ -61,10 +62,10 @@ the code.
 - [x] **Event-driven pipeline** — SNS fan-out → long-polling SQS consumer with fail-fast Zod validation.
 - [x] **Dead Letter Queue** — `RedrivePolicy` (`maxReceiveCount=3`) routes poison messages to `orders-dlq`.
 - [x] **Circuit Breaker** — opossum around the downstream call; opens on repeated failures so the worker fails fast.
+- [x] **Retry with backoff** — transient downstream failures are retried in-process with exponential backoff + jitter before the message returns to SQS.
 - [x] **Idempotent consumption** — re-delivered `orderId`s are deduped for at-least-once safety.
 - [x] **Structured logging** — JSON logs via Pino.
 - [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + tests).
-- [ ] **In-process retry with exponential backoff** for transient downstream failures.
 - [ ] **Redis-backed idempotency store** — the async `IdempotencyStore` interface exists so the in-memory store can be swapped for one shared across workers.
 - [ ] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (SSE/KMS).
 - [ ] **Operational metrics & alerting** — processed / failed / DLQ-depth counters with documented alert thresholds.
@@ -134,7 +135,7 @@ To see the resilience patterns in action, the code is configured to simulate a d
 
 1. Edit `src/scripts/publish-test-event.ts` and set `amount: 1500.00`.
 2. Run `pnpm run dev:publish`.
-3. Watch the Worker attempt to process the message exactly 3 times before the SQS automatically moves it to the DLQ, restoring silence and system health.
+3. Watch the Worker retry each delivery in-process with backoff; after 3 SQS receives (`maxReceiveCount=3`), the message is moved to the DLQ.
 
 ### Inspecting the DLQ
 
