@@ -54,6 +54,7 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Encryption at rest:** A customer-managed KMS key (with rotation) encrypts the topic and both queues; its key policy grants SNS only the `GenerateDataKey`/`Decrypt` it needs for fan-out.
 - **Least-privilege IAM:** Separate publisher and consumer policies — the producer cannot read the queue, the worker cannot publish, and the DLQ is read-only for inspection.
 - **Structured Logging:** Pino is used for high-performance, JSON-formatted observability.
+- **Operational Metrics:** Prometheus counters and gauges on `/metrics` — throughput, failures split by cause, retries, breaker state, and queue/DLQ depth — with documented alert thresholds.
 
 ## 🗺️ Roadmap
 
@@ -69,7 +70,7 @@ the code.
 - [x] **Structured logging** — JSON logs via Pino.
 - [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + tests).
 - [x] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (KMS).
-- [ ] **Operational metrics & alerting** — processed / failed / DLQ-depth counters with documented alert thresholds.
+- [x] **Operational metrics & alerting** — Prometheus metrics on `/metrics` with documented alert thresholds.
 - [ ] **Private networking** — VPC endpoints for SQS/SNS, left out for now because LocalStack only mocks them, so the config could not be verified here.
 - [ ] **Redis-backed idempotency store** — the async `IdempotencyStore` interface exists so the in-memory store can be swapped for one shared across workers.
 
@@ -150,17 +151,23 @@ CI (`.github/workflows/ci.yml`) runs `typecheck` + `test` on every push and pull
 
 ### Testing Success (Normal Order)
 
-1. Edit `src/scripts/publish-test-event.ts` and set `amount: 500.00`
-2. Run `pnpm run dev:publish`
-3. Watch the Worker process the order successfully
+```bash
+pnpm run dev:publish        # defaults to 99.99
+```
+
+Watch the Worker validate and process the order, then delete the message.
 
 ### Testing the Dead Letter Queue (DLQ)
 
-To see the resilience patterns in action, the code is configured to simulate a database failure for any order with an amount > 1000.
+The demo handler simulates a database failure for any order over 1000, which is
+how the resilience path is exercised end-to-end.
 
-1. Edit `src/scripts/publish-test-event.ts` and set `amount: 1500.00`.
-2. Run `pnpm run dev:publish`.
-3. Watch the Worker retry each delivery in-process with backoff; after 3 SQS receives (`maxReceiveCount=3`), the message is moved to the DLQ.
+```bash
+pnpm run dev:publish 1500
+```
+
+Watch the Worker retry each delivery in-process with backoff; after
+`maxReceiveCount=3` SQS receives, the message is moved to the DLQ.
 
 ### Inspecting the DLQ
 
@@ -180,6 +187,44 @@ awslocal sqs get-queue-attributes \
   --attribute-names All
 ```
 
+## 📊 Observability
+
+The worker exposes Prometheus metrics on `http://localhost:9464/metrics` and a
+liveness probe on `/health`.
+
+```bash
+curl -s localhost:9464/metrics | grep ^orders_
+```
+
+| Metric                              | Type      | What it answers                                    |
+| ----------------------------------- | --------- | -------------------------------------------------- |
+| `orders_processed_total`            | counter   | Throughput — orders acknowledged to SQS             |
+| `orders_failed_total{reason}`       | counter   | Failures, split into `validation` and `downstream`  |
+| `orders_retry_total`                | counter   | In-process retries absorbed before SQS redelivery   |
+| `orders_duplicate_total`            | counter   | Re-deliveries skipped by the idempotency layer      |
+| `orders_circuit_state`              | gauge     | Breaker: 0 closed, 1 half-open, 2 open              |
+| `orders_circuit_rejected_total`     | counter   | Calls short-circuited while the breaker was open    |
+| `orders_queue_messages_visible`     | gauge     | Backlog on the main queue and the DLQ               |
+| `orders_queue_messages_in_flight`   | gauge     | Received but not yet acknowledged                   |
+| `order_processing_duration_seconds` | histogram | Latency, bucketed around the breaker's 3s timeout   |
+
+Splitting failures by reason is the point of the design: `validation` means a
+message will *never* succeed and is heading for the DLQ, while `downstream` is
+expected to recover. One page, the other does not.
+
+### Alert thresholds
+
+| Alert                | Condition                                                | Why                                                                     |
+| -------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **DLQ not empty**    | `orders_queue_messages_visible{queue="dlq"} > 0` for 5m   | Every DLQ message is an order that never processed — always human-owned. |
+| **Backlog growing**  | `orders_queue_messages_visible{queue="main"} > 1000` for 10m | Consumers cannot keep up; scale out or investigate the downstream.    |
+| **Breaker open**     | `orders_circuit_state == 2` for 2m                        | The dependency is down; a brief trip is by design, a sustained one is not. |
+| **Validation spike** | `rate(orders_failed_total{reason="validation"}[5m]) > 0`  | A producer is emitting events this consumer cannot read — a contract break. |
+| **Worker stalled**   | `rate(orders_processed_total[15m]) == 0` with backlog > 0 | Messages are waiting and nothing is moving.                             |
+
+Thresholds are stated as *sustained* levels because `ApproximateNumberOfMessages`
+is eventually consistent — a single reading is not enough to page someone.
+
 ## 📁 Project Structure
 
 ```
@@ -198,7 +243,7 @@ src/
 ├── infrastructure/          # External integrations
 │   ├── aws/                 # SQS and SNS clients & publishers
 │   ├── idempotency/         # Dedupe store + decorator around the OrderHandler (+ .spec.ts)
-│   ├── observability/       # Structured logging (Pino)
+│   ├── observability/       # Pino logging, Prometheus metrics, queue-depth poller
 │   └── resilience/          # Circuit breaker around the OrderHandler (+ .spec.ts)
 ├── presentation/            # Entrypoints
 │   └── sqs.consumer.ts      # The SQS polling engine (+ .spec.ts)
@@ -217,8 +262,11 @@ The following environment variables are used (with defaults for local developmen
 | --------------- | ------------------------------------------------------- | ------------------ |
 | `SQS_QUEUE_URL` | `http://localhost:4566/000000000000/orders-queue`        | Main SQS queue URL |
 | `SNS_TOPIC_ARN` | `arn:aws:sns:us-east-1:000000000000:orders-events-topic` | SNS topic ARN      |
+| `SQS_DLQ_URL`   | `http://localhost:4566/000000000000/orders-dlq`          | DLQ, for depth gauge |
 | `AWS_REGION`    | `us-east-1`                                              | AWS region         |
 | `LOG_LEVEL`     | `info`                                                   | Pino log level     |
+| `METRICS_PORT`  | `9464`                                                   | `/metrics` listener |
+| `QUEUE_DEPTH_INTERVAL_MS` | `30000`                                        | Queue depth poll interval |
 
 The defaults match what `pnpm run infra:up` provisions; `pnpm run infra:output`
 prints the live values for any other environment.
