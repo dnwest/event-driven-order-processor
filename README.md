@@ -46,7 +46,7 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Event-Driven Design:** Complete decoupling of producers and consumers.
 - **Circuit Breaker:** The downstream call is wrapped with [opossum](https://github.com/nodeshift/opossum). Repeated failures **open** the circuit so the worker fails fast instead of hammering a dead dependency; while open, messages are not deleted, so they flow to redrive/DLQ. The breaker half-opens to probe recovery and closes once the dependency is healthy. Every transition is logged.
 - **Retry with Backoff:** Transient downstream failures are retried in-process with exponential backoff and jitter before the message is surrendered to SQS. Retries run **inside** the circuit breaker, so it sees the final outcome; deterministic failures (e.g. validation) fail fast and are not retried.
-- **Idempotent Consumption:** SQS delivery is *at-least-once*, so the same order can arrive twice. Each `orderId` is recorded **after** it is successfully processed; a re-delivered duplicate is skipped as a logged no-op (and still acknowledged, removing it from the queue). Failed orders are left unrecorded so a retry reprocesses them.
+- **Idempotent Consumption:** SQS delivery is *at-least-once*, so the same order can arrive twice. Each `orderId` is recorded **after** it is successfully processed; a re-delivered duplicate is skipped as a logged no-op (and still acknowledged, removing it from the queue). Failed orders are left unrecorded so a retry reprocesses them. In-memory by default, or Redis-backed so the dedupe holds across scaled-out workers.
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
@@ -72,9 +72,7 @@ the code.
 - [x] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (KMS).
 - [x] **Operational metrics & alerting** — Prometheus metrics on `/metrics` with documented alert thresholds.
 - [ ] **Private networking** — VPC endpoints for SQS/SNS, left out for now because LocalStack only mocks them, so the config could not be verified here.
-- [ ] **Redis-backed idempotency store** — the async `IdempotencyStore` interface exists so the in-memory store can be swapped for one shared across workers.
-
-Unchecked items are listed in the order they are planned.
+- [x] **Redis-backed idempotency store** — dedupe shared across worker instances, behind the same `IdempotencyStore` interface.
 
 ## 🚀 How to Run Locally
 
@@ -132,6 +130,30 @@ provider falls back to the standard AWS credential chain.
 ```bash
 ./scripts/terraform.sh apply -var 'localstack_endpoint='
 ```
+
+### Running more than one worker
+
+The default dedupe store lives in the worker's memory, so a second instance
+would not recognise a duplicate the first one already handled. Point both at
+Redis instead:
+
+```bash
+IDEMPOTENCY_STORE=redis pnpm run dev:worker
+```
+
+`docker compose up -d` already provides Redis (set `REDIS_PORT` if 6379 is taken
+locally). Keys are namespaced `order:processed:<orderId>` and expire after
+`IDEMPOTENCY_TTL_SECONDS`, which only has to outlive the window in which SQS can
+still redeliver — so the set does not grow forever.
+
+Two honest limits. If Redis is unreachable the handler rejects and the message
+goes back to the queue rather than being processed undeduplicated: better a
+delayed order, or one parked in the DLQ for replay, than a customer charged
+twice. And because an order is recorded *after* it succeeds, two truly
+simultaneous deliveries of the same `orderId` can both pass the check before
+either is recorded. Closing that window needs an atomic reservation *before*
+processing, which trades this risk for a worse one — an order lost if the worker
+dies mid-flight.
 
 ## 🧪 Testing
 
@@ -198,7 +220,7 @@ curl -s localhost:9464/metrics | grep ^orders_
 
 | Metric                              | Type      | What it answers                                    |
 | ----------------------------------- | --------- | -------------------------------------------------- |
-| `orders_processed_total`            | counter   | Throughput — orders acknowledged to SQS             |
+| `orders_processed_total`            | counter   | Messages acknowledged — *includes* duplicates skipped |
 | `orders_failed_total{reason}`       | counter   | Failures, split into `validation` and `downstream`  |
 | `orders_retry_total`                | counter   | In-process retries absorbed before SQS redelivery   |
 | `orders_duplicate_total`            | counter   | Re-deliveries skipped by the idempotency layer      |
@@ -211,6 +233,10 @@ curl -s localhost:9464/metrics | grep ^orders_
 Splitting failures by reason is the point of the design: `validation` means a
 message will *never* succeed and is heading for the DLQ, while `downstream` is
 expected to recover. One page, the other does not.
+
+A skipped duplicate is acknowledged like any handled message, so it counts in
+`orders_processed_total` too — real throughput is that minus
+`orders_duplicate_total`.
 
 ### Alert thresholds
 
@@ -242,7 +268,7 @@ src/
 │   └── process-order.ts     # Injectable OrderHandler port (+ .spec.ts)
 ├── infrastructure/          # External integrations
 │   ├── aws/                 # SQS and SNS clients & publishers
-│   ├── idempotency/         # Dedupe store + decorator around the OrderHandler (+ .spec.ts)
+│   ├── idempotency/         # Dedupe decorator + in-memory and Redis stores (+ .spec.ts)
 │   ├── observability/       # Pino logging, Prometheus metrics, queue-depth poller
 │   └── resilience/          # Circuit breaker around the OrderHandler (+ .spec.ts)
 ├── presentation/            # Entrypoints
@@ -267,6 +293,9 @@ The following environment variables are used (with defaults for local developmen
 | `LOG_LEVEL`     | `info`                                                   | Pino log level     |
 | `METRICS_PORT`  | `9464`                                                   | `/metrics` listener |
 | `QUEUE_DEPTH_INTERVAL_MS` | `30000`                                        | Queue depth poll interval |
+| `IDEMPOTENCY_STORE` | `memory`                                             | `memory` or `redis` |
+| `REDIS_URL`     | `redis://localhost:6379`                                 | Used when the store is `redis` |
+| `IDEMPOTENCY_TTL_SECONDS` | `86400`                                        | How long an `orderId` is remembered |
 
 The defaults match what `pnpm run infra:up` provisions; `pnpm run infra:output`
 prints the live values for any other environment.
