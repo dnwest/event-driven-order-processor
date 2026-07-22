@@ -7,6 +7,12 @@ const envSchema = z.object({
   AWS_ACCESS_KEY_ID: z.string().default('test'),
   AWS_SECRET_ACCESS_KEY: z.string().default('test'),
   AWS_ENDPOINT: z.string().default('http://localhost:4566'),
+  SNS_TOPIC_ARN: z
+    .string()
+    .default('arn:aws:sns:us-east-1:000000000000:orders-events-topic'),
+  SQS_QUEUE_URL: z
+    .string()
+    .default('http://localhost:4566/000000000000/orders-queue'),
   LOG_LEVEL: z
     .enum(['debug', 'info', 'warn', 'error', 'silent'])
     .default('info'),

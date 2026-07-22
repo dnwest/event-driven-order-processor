@@ -5,12 +5,12 @@ import {
   Message,
 } from '@aws-sdk/client-sqs';
 import { sqsClient } from '../infrastructure/aws/sqs.client.js';
+import { env } from '../config/env.js';
 import { logger } from '../infrastructure/observability/logger.js';
 import { OrderEventSchema } from '../domain/order.schema.js';
 import { processOrder, type OrderHandler } from '../domain/process-order.js';
 
-const DEFAULT_QUEUE_URL =
-  process.env.SQS_QUEUE_URL || 'http://localhost:4566/000000000000/orders-queue';
+const DEFAULT_QUEUE_URL = env.SQS_QUEUE_URL;
 
 export interface ConsumerOptions {
   client?: SQSClient;

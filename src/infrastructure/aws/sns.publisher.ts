@@ -1,9 +1,10 @@
 import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 import { snsClient } from './sns.client.js';
 import { logger } from '../observability/logger.js';
+import { env } from '../../config/env.js';
 import type { OrderEvent } from '../../domain/order.schema.js';
 
-const TOPIC_ARN = 'arn:aws:sns:us-east-1:000000000000:order-events-topic';
+const TOPIC_ARN = env.SNS_TOPIC_ARN;
 
 export class OrderSNSPublisher {
   private client: SNSClient;

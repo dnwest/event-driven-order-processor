@@ -7,8 +7,10 @@
   "scripts": {
     "dev:worker": "tsx watch src/index.ts",
     "dev:publish": "tsx src/scripts/publish-test-event.ts",
-    "infra:up": "docker-compose up -d",
-    "infra:down": "docker-compose down",
+    "infra:up": "./scripts/infra-up.sh",
+    "infra:down": "./scripts/terraform.sh destroy -auto-approve -input=false && docker compose down",
+    "infra:plan": "./scripts/terraform.sh plan",
+    "infra:output": "./scripts/terraform.sh output",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

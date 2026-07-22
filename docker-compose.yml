@@ -1,13 +1,8 @@
-version: '3.8'
-
 services:
   localstack:
     image: localstack/localstack:3.0
     ports:
       - "4566:4566"
     environment:
-      SERVICES: sqs,sns
+      SERVICES: sqs,sns,kms,iam,sts
       DEBUG: 1
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock"
-      - "./scripts/setup-localstack.sh:/etc/localstack/init/ready.d/setup-localstack.sh"
