@@ -31,3 +31,25 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  terraform:
+    name: terraform fmt + validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Format check
+        run: terraform -chdir=infra/terraform fmt -check -recursive -diff
+
+      # -backend=false: validation only needs the provider schemas, and no
+      # backend or AWS credentials should be required to review a pull request.
+      - name: Init
+        run: terraform -chdir=infra/terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform -chdir=infra/terraform validate

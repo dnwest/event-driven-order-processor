@@ -169,7 +169,9 @@ pnpm run test:watch  # watch mode
 pnpm run typecheck   # tsc --noEmit
 ```
 
-CI (`.github/workflows/ci.yml`) runs `typecheck` + `test` on every push and pull request.
+CI (`.github/workflows/ci.yml`) runs `typecheck` + `test` on every push and pull
+request, and a second job runs `terraform fmt -check` + `validate` so the
+infrastructure is gated the same way the code is — no AWS credentials needed.
 
 ### Testing Success (Normal Order)
 
