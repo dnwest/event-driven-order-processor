@@ -1,10 +1,12 @@
 # 📨 Event-Driven Order Processor
 
-> An asynchronous order-processing worker demonstrating core Event-Driven Architecture (EDA) patterns — SNS fan-out, SQS consumption, and Dead Letter Queues — with Node.js, AWS SQS/SNS, and LocalStack.
+> An asynchronous order-processing worker built around the failure modes of event-driven systems: SNS fan-out and SQS consumption, guarded by a circuit breaker, retries with backoff, idempotent consumption and a Dead Letter Queue — provisioned with Terraform and instrumented with Prometheus.
 
-![Node.js](https://img.shields.io/badge/Node.js-18.x-green?style=for-the-badge&logo=node.js)
+[![CI](https://github.com/dnwest/event-driven-order-processor/actions/workflows/ci.yml/badge.svg)](https://github.com/dnwest/event-driven-order-processor/actions/workflows/ci.yml)
+![Node.js](https://img.shields.io/badge/Node.js-20.x-green?style=for-the-badge&logo=node.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue?style=for-the-badge&logo=typescript)
 ![AWS](https://img.shields.io/badge/AWS-SQS%20%7C%20SNS-FF9900?style=for-the-badge&logo=amazon-aws)
+![Terraform](https://img.shields.io/badge/Terraform-IaC-7B42BC?style=for-the-badge&logo=terraform)
 ![LocalStack](https://img.shields.io/badge/LocalStack-Cloud%20Emulator-085A87?style=for-the-badge&logo=localstack)
 
 ## 🎯 The Business Case
@@ -16,21 +18,24 @@ This project demonstrates a **decoupled, asynchronous approach** where the core 
 ## 🏗️ Architecture Topology
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Client    │───▶│     API     │───▶│    SNS      │───▶│     SQS     │
-│ (Producer)  │     │ (Publisher) │     │   Topic     │     │   Queue     │
-└─────────────┘     └─────────────┘     └─────────────┘     └──────┬──────┘
-                                                                   │
-                              ┌────────────────────────────────────┘
-                              │            ┌─────────────┐
-                              │            │   Worker    │
-                              │            │ (Consumer)  │
-                              │            └──────┬──────┘
-                              │                   │
-                    ┌─────────┴────────┐    ┌─────▼───────┐
-                    │   DLQ (orders-   │    │   Domain    │
-                    │      dlq)        │    │   Logic     │
-                    └──────────────────┘    └─────────────┘
+┌─────────────┐      ┌─────────────┐      ┌──────────────────┐
+│   Client    │─────▶│  SNS Topic  │─────▶│   orders-queue   │
+│ (Producer)  │      │    (KMS)    │      │      (KMS)       │
+└─────────────┘      └─────────────┘      └────────┬─────────┘
+                                                   │ long polling (20s)
+                                                   ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │                          Worker                          │
+        │  Zod validation (fail fast, never retried)               │
+        │    └─▶ idempotency ──▶ circuit breaker ──▶ retry+backoff │
+        │          (Redis)                              └─▶ domain │
+        └───────────┬──────────────────────────────────┬───────────┘
+                    │ failure: message not deleted     │ /metrics
+                    ▼                                  ▼
+        ┌──────────────────────┐          ┌──────────────────────┐
+        │      orders-dlq      │          │  Prometheus scrape   │
+        │  (maxReceiveCount=3) │          │  + alert thresholds  │
+        └──────────────────────┘          └──────────────────────┘
 ```
 
 The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message Queue** for reliable consumption:
@@ -58,9 +63,10 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 
 ## 🗺️ Roadmap
 
-A snapshot of the current stage. Checked items are implemented in this repo;
-unchecked items are the planned next steps, each building on a seam already in
-the code.
+A snapshot of the current stage. Checked items are implemented and verifiable in
+this repo — each has tests, a runbook, or both. The unchecked ones are deliberate
+scope, kept visible with the reason they were left out rather than quietly
+dropped.
 
 - [x] **Event-driven pipeline** — SNS fan-out → long-polling SQS consumer with fail-fast Zod validation.
 - [x] **Dead Letter Queue** — `RedrivePolicy` (`maxReceiveCount=3`) routes poison messages to `orders-dlq`.
@@ -71,8 +77,9 @@ the code.
 - [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + tests).
 - [x] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (KMS).
 - [x] **Operational metrics & alerting** — Prometheus metrics on `/metrics` with documented alert thresholds.
-- [ ] **Private networking** — VPC endpoints for SQS/SNS, left out for now because LocalStack only mocks them, so the config could not be verified here.
 - [x] **Redis-backed idempotency store** — dedupe shared across worker instances, behind the same `IdempotencyStore` interface.
+- [ ] **Private networking** — VPC endpoints for SQS/SNS. Left out because LocalStack only mocks them, so the config could not be verified here; claiming it would be dishonest.
+- [ ] **Remote Terraform state** — S3 backend with locking. Local state is fine for a single-operator demo, not for a team.
 
 ## 🚀 How to Run Locally
 
@@ -159,9 +166,12 @@ dies mid-flight.
 
 ### Unit tests
 
-Fast, dependency-free unit tests run with [Vitest](https://vitest.dev) — no LocalStack
-or Docker required. They cover Zod validation and the consumer's message-handling
-semantics (delete-on-success; **leave-on-failure** so redrive/DLQ can take over).
+Fast, dependency-free unit tests run with [Vitest](https://vitest.dev) — no LocalStack,
+Docker or Redis required. Every resilience layer is injectable, which is what makes
+that possible: the tests cover Zod validation, the consumer's message-handling
+semantics (delete-on-success; **leave-on-failure** so redrive/DLQ can take over),
+breaker transitions, backoff delays without real waiting, dedupe across store
+instances, and the metrics each layer reports.
 
 ```bash
 pnpm test            # run once
@@ -258,10 +268,15 @@ is eventually consistent — a single reading is not enough to page someone.
 ```
 infra/terraform/             # The full AWS topology as code
 ├── providers.tf             # AWS provider, LocalStack endpoint overrides
+├── variables.tf             # Region, name prefix, redrive and retention knobs
 ├── kms.tf                   # Customer-managed key + policy allowing SNS fan-out
 ├── messaging.tf             # Topic, queue, DLQ, redrive, subscription
 ├── iam.tf                   # Least-privilege publisher & consumer policies
 └── outputs.tf               # Queue URLs, topic ARN, policy ARNs
+
+scripts/
+├── infra-up.sh              # LocalStack + terraform apply
+└── terraform.sh             # Terraform via local binary or Docker image
 
 src/
 ├── config/                  # Environment variables validation (Zod)
@@ -272,12 +287,12 @@ src/
 │   ├── aws/                 # SQS and SNS clients & publishers
 │   ├── idempotency/         # Dedupe decorator + in-memory and Redis stores (+ .spec.ts)
 │   ├── observability/       # Pino logging, Prometheus metrics, queue-depth poller
-│   └── resilience/          # Circuit breaker around the OrderHandler (+ .spec.ts)
+│   └── resilience/          # Circuit breaker and retry/backoff (+ .spec.ts)
 ├── presentation/            # Entrypoints
 │   └── sqs.consumer.ts      # The SQS polling engine (+ .spec.ts)
 ├── scripts/                 # Test producers
 │   └── publish-test-event.ts
-└── index.ts                 # Worker bootstrap
+└── index.ts                 # Worker bootstrap — composes every layer
 
 Tests are co-located as `*.spec.ts` next to the code they cover.
 ```
@@ -292,6 +307,8 @@ The following environment variables are used (with defaults for local developmen
 | `SNS_TOPIC_ARN` | `arn:aws:sns:us-east-1:000000000000:orders-events-topic` | SNS topic ARN      |
 | `SQS_DLQ_URL`   | `http://localhost:4566/000000000000/orders-dlq`          | DLQ, for depth gauge |
 | `AWS_REGION`    | `us-east-1`                                              | AWS region         |
+| `AWS_ENDPOINT`  | `http://localhost:4566`                                  | LocalStack endpoint; unset for real AWS |
+| `NODE_ENV`      | `development`                                            | Enables pretty logs when `development` |
 | `LOG_LEVEL`     | `info`                                                   | Pino log level     |
 | `METRICS_PORT`  | `9464`                                                   | `/metrics` listener |
 | `QUEUE_DEPTH_INTERVAL_MS` | `30000`                                        | Queue depth poll interval |
@@ -317,3 +334,15 @@ prints the live values for any other environment.
 
 - Check the RedrivePolicy on the main queue (command above)
 - Verify the DLQ exists: `awslocal sqs get-queue-url --queue-name orders-dlq`
+
+### `infra:up` fails to start a container?
+
+Another local project may already hold a port. Redis is the usual one — start it
+elsewhere with `REDIS_PORT=6380 pnpm run infra:up` and set `REDIS_URL` to match.
+
+### Metrics endpoint empty or unreachable?
+
+- The worker logs `Metrics server listening` on startup; a port clash is logged
+  as an error and does **not** stop the consumer.
+- Queue depth gauges are only filled after the first poll
+  (`QUEUE_DEPTH_INTERVAL_MS`).
