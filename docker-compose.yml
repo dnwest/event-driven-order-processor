@@ -6,3 +6,9 @@ services:
     environment:
       SERVICES: sqs,sns,kms,iam,sts
       DEBUG: 1
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      # Overridable, since 6379 is often already taken by another local project.
+      - "${REDIS_PORT:-6379}:6379"

@@ -17,6 +17,11 @@ const envSchema = z.object({
     .string()
     .default('http://localhost:4566/000000000000/orders-dlq'),
   METRICS_PORT: z.coerce.number().int().positive().default(9464),
+  // In-memory is the zero-dependency default; Redis is what makes running more
+  // than one worker safe.
+  IDEMPOTENCY_STORE: z.enum(['memory', 'redis']).default('memory'),
+  REDIS_URL: z.string().default('redis://localhost:6379'),
+  IDEMPOTENCY_TTL_SECONDS: z.coerce.number().int().positive().default(86_400),
   QUEUE_DEPTH_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   LOG_LEVEL: z
     .enum(['debug', 'info', 'warn', 'error', 'silent'])

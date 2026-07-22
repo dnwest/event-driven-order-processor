@@ -25,6 +25,7 @@
     "@aws-sdk/client-sns": "^3.1019.0",
     "@aws-sdk/client-sqs": "^3.1019.0",
     "dotenv": "^17.3.1",
+    "ioredis": "^5.11.1",
     "opossum": "^10.0.0",
     "pino": "^10.3.1",
     "prom-client": "^15.1.3",
