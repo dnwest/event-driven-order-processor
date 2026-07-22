@@ -19,6 +19,8 @@ export interface RetryOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Injectable so tests can pin the jitter; defaults to `Math.random`. */
   random?: () => number;
+  /** Called once per scheduled retry, for metrics. */
+  onRetry?: (attempt: number, delayMs: number) => void;
 }
 
 const DEFAULTS: Required<RetryOptions> = {
@@ -28,6 +30,7 @@ const DEFAULTS: Required<RetryOptions> = {
   isRetryable: () => true,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   random: Math.random,
+  onRetry: () => {},
 };
 
 /**
@@ -45,10 +48,8 @@ export function withRetry(
   handler: OrderHandler,
   options: RetryOptions = {}
 ): OrderHandler {
-  const { maxRetries, baseDelayMs, maxDelayMs, isRetryable, sleep, random } = {
-    ...DEFAULTS,
-    ...options,
-  };
+  const { maxRetries, baseDelayMs, maxDelayMs, isRetryable, sleep, random, onRetry } =
+    { ...DEFAULTS, ...options };
 
   return async (order) => {
     for (let attempt = 0; ; attempt++) {
@@ -65,6 +66,7 @@ export function withRetry(
           { orderId: order.orderId, attempt: attempt + 1, delay },
           'Transient failure — retrying after backoff'
         );
+        onRetry(attempt + 1, delay);
         await sleep(delay);
       }
     }

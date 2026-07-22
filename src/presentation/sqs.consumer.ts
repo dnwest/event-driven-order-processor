@@ -6,8 +6,9 @@ import {
 } from '@aws-sdk/client-sqs';
 import { sqsClient } from '../infrastructure/aws/sqs.client.js';
 import { env } from '../config/env.js';
+import { noopMetrics, type MetricsSink } from '../infrastructure/observability/metrics.js';
 import { logger } from '../infrastructure/observability/logger.js';
-import { OrderEventSchema } from '../domain/order.schema.js';
+import { OrderEventSchema, type OrderEvent } from '../domain/order.schema.js';
 import { processOrder, type OrderHandler } from '../domain/process-order.js';
 
 const DEFAULT_QUEUE_URL = env.SQS_QUEUE_URL;
@@ -16,18 +17,21 @@ export interface ConsumerOptions {
   client?: SQSClient;
   queueUrl?: string;
   handler?: OrderHandler;
+  metrics?: MetricsSink;
 }
 
 export class OrderSQSConsumer {
   private client: SQSClient;
   private queueUrl: string;
   private handler: OrderHandler;
+  private metrics: MetricsSink;
   private running = false;
 
   constructor(options: ConsumerOptions = {}) {
     this.client = options.client ?? sqsClient;
     this.queueUrl = options.queueUrl ?? DEFAULT_QUEUE_URL;
     this.handler = options.handler ?? processOrder;
+    this.metrics = options.metrics ?? noopMetrics;
   }
 
   async start(): Promise<void> {
@@ -73,11 +77,25 @@ export class OrderSQSConsumer {
    * (and eventually the DLQ via RedrivePolicy) can take over.
    */
   async handleMessage(message: Message): Promise<void> {
+    const startedAt = Date.now();
+    let orderEvent: OrderEvent;
+
+    // Parsing is separated from processing so the two failure modes are
+    // distinguishable: a malformed payload will never succeed on redelivery,
+    // while a downstream failure is expected to.
     try {
       const snsEnvelope = JSON.parse(message.Body!);
-      const payload = JSON.parse(snsEnvelope.Message);
-      const orderEvent = OrderEventSchema.parse(payload);
+      orderEvent = OrderEventSchema.parse(JSON.parse(snsEnvelope.Message));
+    } catch (error) {
+      logger.error(
+        { error, messageId: message.MessageId },
+        'Failed to process message'
+      );
+      this.metrics.messageFailed('validation');
+      return;
+    }
 
+    try {
       logger.info({ orderId: orderEvent.orderId }, 'Processing order');
 
       await this.handler(orderEvent);
@@ -93,11 +111,13 @@ export class OrderSQSConsumer {
         { orderId: orderEvent.orderId },
         'Order processed and message deleted'
       );
+      this.metrics.messageProcessed((Date.now() - startedAt) / 1000);
     } catch (error) {
       logger.error(
         { error, messageId: message.MessageId },
         'Failed to process message'
       );
+      this.metrics.messageFailed('downstream');
     }
   }
 

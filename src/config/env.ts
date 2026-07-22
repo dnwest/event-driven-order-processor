@@ -13,6 +13,11 @@ const envSchema = z.object({
   SQS_QUEUE_URL: z
     .string()
     .default('http://localhost:4566/000000000000/orders-queue'),
+  SQS_DLQ_URL: z
+    .string()
+    .default('http://localhost:4566/000000000000/orders-dlq'),
+  METRICS_PORT: z.coerce.number().int().positive().default(9464),
+  QUEUE_DEPTH_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   LOG_LEVEL: z
     .enum(['debug', 'info', 'warn', 'error', 'silent'])
     .default('info'),

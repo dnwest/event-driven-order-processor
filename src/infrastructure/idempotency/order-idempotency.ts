@@ -12,6 +12,11 @@ export interface IdempotencyStore {
   add(orderId: string): Promise<void>;
 }
 
+export interface IdempotencyOptions {
+  /** Called when a re-delivered order is skipped, for metrics. */
+  onDuplicate?: (orderId: string) => void;
+}
+
 /** Process-local store. Fine for a single worker; not shared across instances. */
 export class InMemoryIdempotencyStore implements IdempotencyStore {
   private readonly seen = new Set<string>();
@@ -35,14 +40,18 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
  */
 export function withIdempotency(
   handler: OrderHandler,
-  store: IdempotencyStore
+  store: IdempotencyStore,
+  options: IdempotencyOptions = {}
 ): OrderHandler {
+  const { onDuplicate = () => {} } = options;
+
   return async (order) => {
     if (await store.has(order.orderId)) {
       logger.info(
         { orderId: order.orderId },
         'Duplicate order skipped (idempotent no-op)'
       );
+      onDuplicate(order.orderId);
       return;
     }
 

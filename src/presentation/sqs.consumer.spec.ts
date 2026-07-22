@@ -30,6 +30,18 @@ function makeClient() {
   return { client: { send } as unknown as SQSClient, send };
 }
 
+function fakeMetrics() {
+  return {
+    messageProcessed: vi.fn(),
+    messageFailed: vi.fn(),
+    duplicateSkipped: vi.fn(),
+    retryScheduled: vi.fn(),
+    circuitRejected: vi.fn(),
+    circuitStateChanged: vi.fn(),
+    queueDepthObserved: vi.fn(),
+  };
+}
+
 const deleteCalls = (send: ReturnType<typeof vi.fn>) =>
   send.mock.calls.filter(([cmd]) => cmd instanceof DeleteMessageCommand);
 
@@ -70,6 +82,38 @@ describe('OrderSQSConsumer.handleMessage', () => {
 
     expect(handler).toHaveBeenCalledOnce();
     expect(deleteCalls(send)).toHaveLength(0);
+  });
+
+  it('records a processed message with its duration', async () => {
+    const { client } = makeClient();
+    const metrics = fakeMetrics();
+    const consumer = new OrderSQSConsumer({
+      client,
+      handler: vi.fn().mockResolvedValue(undefined),
+      queueUrl: 'q',
+      metrics,
+    });
+
+    await consumer.handleMessage(sqsMessage(validOrder()));
+
+    expect(metrics.messageProcessed).toHaveBeenCalledOnce();
+    expect(metrics.messageProcessed.mock.calls[0][0]).toBeGreaterThanOrEqual(0);
+    expect(metrics.messageFailed).not.toHaveBeenCalled();
+  });
+
+  it('separates validation failures from downstream failures', async () => {
+    const { client } = makeClient();
+    const metrics = fakeMetrics();
+    const handler = vi.fn().mockRejectedValue(new Error('downstream down'));
+    const consumer = new OrderSQSConsumer({ client, handler, queueUrl: 'q', metrics });
+
+    await consumer.handleMessage(sqsMessage({ orderId: 'not-a-uuid' }));
+    await consumer.handleMessage(sqsMessage(validOrder(1500)));
+
+    expect(metrics.messageFailed.mock.calls.map(([reason]) => reason)).toEqual([
+      'validation',
+      'downstream',
+    ]);
   });
 
   it('does not throw on malformed (non-JSON) message bodies', async () => {

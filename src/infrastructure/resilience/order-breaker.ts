@@ -1,5 +1,6 @@
 import CircuitBreaker from 'opossum';
 import { logger } from '../observability/logger.js';
+import type { BreakerState } from '../observability/metrics.js';
 import type { OrderEvent } from '../../domain/order.schema.js';
 import type { OrderHandler } from '../../domain/process-order.js';
 
@@ -12,6 +13,10 @@ export interface OrderBreakerOptions {
   volumeThreshold?: number;
   /** Error rate (%) within the window that trips the breaker once volume is met. */
   errorThresholdPercentage?: number;
+  /** Called on every transition, for metrics. */
+  onStateChange?: (state: BreakerState) => void;
+  /** Called when a call is short-circuited because the circuit is open. */
+  onReject?: () => void;
 }
 
 const DEFAULTS: Required<OrderBreakerOptions> = {
@@ -19,6 +24,8 @@ const DEFAULTS: Required<OrderBreakerOptions> = {
   resetTimeout: 10_000,
   volumeThreshold: 5,
   errorThresholdPercentage: 50,
+  onStateChange: () => {},
+  onReject: () => {},
 };
 
 export interface OrderBreaker {
@@ -55,24 +62,28 @@ export function withCircuitBreaker(
     }
   );
 
-  breaker.on('open', () =>
+  breaker.on('open', () => {
     logger.error(
       { breaker: breaker.name, resetTimeout: config.resetTimeout },
       'Circuit breaker OPEN — short-circuiting downstream calls'
-    )
-  );
-  breaker.on('halfOpen', () =>
+    );
+    config.onStateChange('open');
+  });
+  breaker.on('halfOpen', () => {
     logger.warn(
       { breaker: breaker.name },
       'Circuit breaker HALF-OPEN — probing downstream recovery'
-    )
-  );
-  breaker.on('close', () =>
+    );
+    config.onStateChange('half_open');
+  });
+  breaker.on('close', () => {
     logger.info(
       { breaker: breaker.name },
       'Circuit breaker CLOSED — downstream healthy'
-    )
-  );
+    );
+    config.onStateChange('closed');
+  });
+  breaker.on('reject', () => config.onReject());
 
   return { handler: (order) => breaker.fire(order), breaker };
 }
