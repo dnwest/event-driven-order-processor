@@ -50,7 +50,9 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
-- **Local environment automation:** A setup script provisions the SNS Topic, SQS Queue, and DLQ on LocalStack.
+- **Infrastructure as Code:** The whole topology — topic, queue, DLQ, redrive, encryption, IAM — is declared in Terraform (`infra/terraform`) and applied to LocalStack. The same code targets real AWS by clearing one variable.
+- **Encryption at rest:** A customer-managed KMS key (with rotation) encrypts the topic and both queues; its key policy grants SNS only the `GenerateDataKey`/`Decrypt` it needs for fan-out.
+- **Least-privilege IAM:** Separate publisher and consumer policies — the producer cannot read the queue, the worker cannot publish, and the DLQ is read-only for inspection.
 - **Structured Logging:** Pino is used for high-performance, JSON-formatted observability.
 
 ## 🗺️ Roadmap
@@ -66,9 +68,12 @@ the code.
 - [x] **Idempotent consumption** — re-delivered `orderId`s are deduped for at-least-once safety.
 - [x] **Structured logging** — JSON logs via Pino.
 - [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + tests).
-- [ ] **Redis-backed idempotency store** — the async `IdempotencyStore` interface exists so the in-memory store can be swapped for one shared across workers.
-- [ ] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (SSE/KMS).
+- [x] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (KMS).
 - [ ] **Operational metrics & alerting** — processed / failed / DLQ-depth counters with documented alert thresholds.
+- [ ] **Private networking** — VPC endpoints for SQS/SNS, left out for now because LocalStack only mocks them, so the config could not be verified here.
+- [ ] **Redis-backed idempotency store** — the async `IdempotencyStore` interface exists so the in-memory store can be swapped for one shared across workers.
+
+Unchecked items are listed in the order they are planned.
 
 ## 🚀 How to Run Locally
 
@@ -76,10 +81,19 @@ This project uses **LocalStack** to emulate AWS services locally. No AWS account
 
 ### 1. Start the Local Cloud (LocalStack)
 
-This will spin up a local AWS environment and automatically run the setup script to create the SNS Topic, SQS Queue, and DLQ.
+This spins up a local AWS environment and applies the Terraform in `infra/terraform`,
+creating the KMS key, SNS Topic, SQS Queue, DLQ, and IAM policies.
 
 ```bash
 pnpm run infra:up
+```
+
+Terraform runs from the official Docker image when it is not installed locally, so
+there is nothing to install. Useful follow-ups:
+
+```bash
+pnpm run infra:plan    # preview changes
+pnpm run infra:output  # queue URLs, topic ARN, policy ARNs
 ```
 
 ### 2. Install Dependencies & Start the Worker
@@ -103,8 +117,19 @@ Watch the Worker terminal to see the event being received, validated, and proces
 
 ### 4. Stop the Infrastructure
 
+Destroys the Terraform-managed resources, then stops LocalStack.
+
 ```bash
 pnpm run infra:down
+```
+
+### Targeting real AWS
+
+The Terraform is not LocalStack-specific: set `localstack_endpoint = ""` and the
+provider falls back to the standard AWS credential chain.
+
+```bash
+./scripts/terraform.sh apply -var 'localstack_endpoint='
 ```
 
 ## 🧪 Testing
@@ -139,6 +164,9 @@ To see the resilience patterns in action, the code is configured to simulate a d
 
 ### Inspecting the DLQ
 
+Without `awslocal` installed, prefix these with
+`docker exec $(docker ps -qf name=localstack)`.
+
 ```bash
 # Check messages in the Dead Letter Queue
 awslocal sqs receive-message --queue-url http://localhost:4566/000000000000/orders-dlq
@@ -155,6 +183,13 @@ awslocal sqs get-queue-attributes \
 ## 📁 Project Structure
 
 ```
+infra/terraform/             # The full AWS topology as code
+├── providers.tf             # AWS provider, LocalStack endpoint overrides
+├── kms.tf                   # Customer-managed key + policy allowing SNS fan-out
+├── messaging.tf             # Topic, queue, DLQ, redrive, subscription
+├── iam.tf                   # Least-privilege publisher & consumer policies
+└── outputs.tf               # Queue URLs, topic ARN, policy ARNs
+
 src/
 ├── config/                  # Environment variables validation (Zod)
 ├── domain/                  # Business entities, schemas & logic
@@ -180,10 +215,13 @@ The following environment variables are used (with defaults for local developmen
 
 | Variable        | Default                                                 | Description        |
 | --------------- | ------------------------------------------------------- | ------------------ |
-| `SQS_QUEUE_URL` | `http://localhost:4566/000000000000/orders-queue`       | Main SQS queue URL |
-| `SNS_TOPIC_ARN` | `arn:aws:sns:us-east-1:000000000000:order-events-topic` | SNS topic ARN      |
-| `AWS_REGION`    | `us-east-1`                                             | AWS region         |
-| `LOG_LEVEL`     | `info`                                                  | Pino log level     |
+| `SQS_QUEUE_URL` | `http://localhost:4566/000000000000/orders-queue`        | Main SQS queue URL |
+| `SNS_TOPIC_ARN` | `arn:aws:sns:us-east-1:000000000000:orders-events-topic` | SNS topic ARN      |
+| `AWS_REGION`    | `us-east-1`                                              | AWS region         |
+| `LOG_LEVEL`     | `info`                                                   | Pino log level     |
+
+The defaults match what `pnpm run infra:up` provisions; `pnpm run infra:output`
+prints the live values for any other environment.
 
 ## 🔧 Troubleshooting
 
