@@ -37,6 +37,7 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
 - **Infrastructure as Code:** The whole topology — topic, queue, DLQ, redrive, encryption, IAM — is declared in Terraform (`infra/terraform`) and applied to LocalStack. The same code targets real AWS by clearing one variable.
+- **Remote Terraform state:** State lives in an S3 bucket with **S3-native locking** (`use_lockfile`, no DynamoDB table), so concurrent runs can't corrupt it. The state bucket is bootstrapped before `init`, since a backend bucket can't be managed by the state it holds. LocalStack vs. real AWS is a `-backend-config` file, mirroring how the provider is switched.
 - **Encryption at rest:** A customer-managed KMS key (with rotation) encrypts the topic and both queues; its key policy grants SNS only the `GenerateDataKey`/`Decrypt` it needs for fan-out.
 - **Least-privilege IAM:** Separate publisher and consumer policies — the producer cannot read the queue, the worker cannot publish, and the DLQ is read-only for inspection.
 - **Structured Logging:** Pino is used for high-performance, JSON-formatted observability.
@@ -59,8 +60,8 @@ dropped.
 - [x] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (KMS).
 - [x] **Operational metrics & alerting** — Prometheus metrics on `/metrics` with documented alert thresholds.
 - [x] **Redis-backed idempotency store** — dedupe shared across worker instances, behind the same `IdempotencyStore` interface.
+- [x] **Remote Terraform state** — S3 backend with S3-native locking (`use_lockfile`), verified against LocalStack so a team can share state safely.
 - [ ] **Private networking** — VPC endpoints for SQS/SNS. Left out because LocalStack only mocks them, so the config could not be verified here; claiming it would be dishonest.
-- [ ] **Remote Terraform state** — S3 backend with locking. Local state is fine for a single-operator demo, not for a team.
 
 ## 🚀 How to Run Locally
 
@@ -68,8 +69,9 @@ This project uses **LocalStack** to emulate AWS services locally. No AWS account
 
 ### 1. Start the Local Cloud (LocalStack)
 
-This spins up a local AWS environment and applies the Terraform in `infra/terraform`,
-creating the KMS key, SNS Topic, SQS Queue, DLQ, and IAM policies.
+This spins up a local AWS environment, creates the S3 bucket that holds the
+Terraform state, then `init`s against it and applies the Terraform in
+`infra/terraform` — the KMS key, SNS Topic, SQS Queue, DLQ, and IAM policies.
 
 ```bash
 pnpm run infra:up
@@ -112,10 +114,17 @@ pnpm run infra:down
 
 ### Targeting real AWS
 
-The Terraform is not LocalStack-specific: set `localstack_endpoint = ""` and the
-provider falls back to the standard AWS credential chain.
+The Terraform is not LocalStack-specific. Two things switch, both by pointing at
+real AWS instead of the emulator:
+
+1. **The provider** — set `localstack_endpoint = ""` and it falls back to the
+   standard AWS credential chain.
+2. **The state backend** — `init` against a real, versioned S3 bucket instead of
+   the bundled LocalStack one. Copy `infra/terraform/backend/localstack.s3.tfbackend`,
+   drop the LocalStack overrides, and point `bucket`/`region` at your bucket.
 
 ```bash
+./scripts/terraform.sh init -reconfigure -backend-config=backend/aws.s3.tfbackend
 ./scripts/terraform.sh apply -var 'localstack_endpoint='
 ```
 
@@ -248,15 +257,17 @@ is eventually consistent — a single reading is not enough to page someone.
 
 ```
 infra/terraform/             # The full AWS topology as code
+├── versions.tf              # Terraform + provider pins, S3 remote-state backend
 ├── providers.tf             # AWS provider, LocalStack endpoint overrides
 ├── variables.tf             # Region, name prefix, redrive and retention knobs
 ├── kms.tf                   # Customer-managed key + policy allowing SNS fan-out
 ├── messaging.tf             # Topic, queue, DLQ, redrive, subscription
 ├── iam.tf                   # Least-privilege publisher & consumer policies
-└── outputs.tf               # Queue URLs, topic ARN, policy ARNs
+├── outputs.tf               # Queue URLs, topic ARN, policy ARNs
+└── backend/                 # Backend config for `terraform init` (LocalStack; copy for AWS)
 
 scripts/
-├── infra-up.sh              # LocalStack + terraform apply
+├── infra-up.sh              # LocalStack + state bucket + terraform apply
 └── terraform.sh             # Terraform via local binary or Docker image
 
 src/
