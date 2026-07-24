@@ -1,10 +1,10 @@
 services:
   localstack:
-    image: localstack/localstack:3.0
+    image: localstack/localstack:3.8
     ports:
       - "4566:4566"
     environment:
-      SERVICES: sqs,sns,kms,iam,sts
+      SERVICES: sqs,sns,kms,iam,sts,s3
       DEBUG: 1
 
   redis:

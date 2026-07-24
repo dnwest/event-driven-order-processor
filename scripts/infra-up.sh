@@ -14,5 +14,13 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-"$ROOT/scripts/terraform.sh" init -input=false
+# Bootstrap the state bucket before init: the bucket that holds the remote
+# state cannot be managed by the state living inside it. Idempotent — a second
+# run just finds the bucket already there.
+echo "Ensuring the Terraform state bucket exists..."
+docker compose -f "$ROOT/docker-compose.yml" exec -T localstack \
+  awslocal s3api create-bucket --bucket orders-tf-state >/dev/null 2>&1 || true
+
+"$ROOT/scripts/terraform.sh" init -input=false -reconfigure \
+  -backend-config=backend/localstack.s3.tfbackend
 "$ROOT/scripts/terraform.sh" apply -auto-approve -input=false
