@@ -56,7 +56,7 @@ dropped.
 - [x] **Retry with backoff** — transient downstream failures are retried in-process with exponential backoff + jitter before the message returns to SQS.
 - [x] **Idempotent consumption** — re-delivered `orderId`s are deduped for at-least-once safety.
 - [x] **Structured logging** — JSON logs via Pino.
-- [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + tests).
+- [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + lint + tests).
 - [x] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (KMS).
 - [x] **Operational metrics & alerting** — Prometheus metrics on `/metrics` with documented alert thresholds.
 - [x] **Redis-backed idempotency store** — dedupe shared across worker instances, behind the same `IdempotencyStore` interface.
@@ -169,9 +169,13 @@ pnpm run test:watch  # watch mode
 pnpm run typecheck   # tsc --noEmit
 ```
 
-CI (`.github/workflows/ci.yml`) runs `typecheck` + `test` on every push and pull
-request, and a second job runs `terraform fmt -check` + `validate` so the
+CI (`.github/workflows/ci.yml`) runs `typecheck` + `lint` + `test` on every push
+and pull request, and a second job runs `terraform fmt -check` + `validate` so the
 infrastructure is gated the same way the code is — no AWS credentials needed.
+
+Linting is [ESLint](https://eslint.org) with
+[typescript-eslint](https://typescript-eslint.io) (flat config in
+`eslint.config.js`): `pnpm lint`, or `pnpm lint:fix` to autofix.
 
 ### Testing Success (Normal Order)
 
