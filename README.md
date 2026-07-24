@@ -17,26 +17,7 @@ This project demonstrates a **decoupled, asynchronous approach** where the core 
 
 ## 🏗️ Architecture Topology
 
-```
-┌─────────────┐      ┌─────────────┐      ┌──────────────────┐
-│   Client    │─────▶│  SNS Topic  │─────▶│   orders-queue   │
-│ (Producer)  │      │    (KMS)    │      │      (KMS)       │
-└─────────────┘      └─────────────┘      └────────┬─────────┘
-                                                   │ long polling (20s)
-                                                   ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │                          Worker                          │
-        │  Zod validation (fail fast, never retried)               │
-        │    └─▶ idempotency ──▶ circuit breaker ──▶ retry+backoff │
-        │          (Redis)                              └─▶ domain │
-        └───────────┬──────────────────────────────────┬───────────┘
-                    │ failure: message not deleted     │ /metrics
-                    ▼                                  ▼
-        ┌──────────────────────┐          ┌──────────────────────┐
-        │      orders-dlq      │          │  Prometheus scrape   │
-        │  (maxReceiveCount=3) │          │  + alert thresholds  │
-        └──────────────────────┘          └──────────────────────┘
-```
+![Architecture: a client publishes to a KMS-encrypted SNS topic that fans out to the orders-queue. A worker consumes by long polling and runs Zod validation, idempotency, a circuit breaker and retry with backoff. Failures leave the message for the orders-dlq after three receives, and metrics are exposed to Prometheus.](arquitetura_sns_sqs_worker_dlq.svg)
 
 The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message Queue** for reliable consumption:
 
