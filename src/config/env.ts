@@ -23,6 +23,8 @@ const envSchema = z.object({
   REDIS_URL: z.string().default('redis://localhost:6379'),
   IDEMPOTENCY_TTL_SECONDS: z.coerce.number().int().positive().default(86_400),
   QUEUE_DEPTH_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  // Sits under the 30s that ECS and Kubernetes allow by default after SIGTERM.
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   LOG_LEVEL: z
     .enum(['debug', 'info', 'warn', 'error', 'silent'])
     .default('info'),

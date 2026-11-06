@@ -26,6 +26,8 @@ export class OrderSQSConsumer {
   private handler: OrderHandler;
   private metrics: MetricsSink;
   private running = false;
+  private abort = new AbortController();
+  private loop: Promise<void> = Promise.resolve();
 
   constructor(options: ConsumerOptions = {}) {
     this.client = options.client ?? sqsClient;
@@ -34,10 +36,33 @@ export class OrderSQSConsumer {
     this.metrics = options.metrics ?? noopMetrics;
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
     this.running = true;
+    this.abort = new AbortController();
     logger.info({ queueUrl: this.queueUrl }, 'Starting SQS Consumer');
 
+    this.loop = this.poll();
+    return this.loop;
+  }
+
+  /**
+   * Stops polling and resolves once the loop has exited.
+   *
+   * The long poll is aborted, but the message being handled runs to completion,
+   * delete included. The rest of its batch is left alone and SQS makes it
+   * visible again after the visibility timeout.
+   */
+  async stop(): Promise<void> {
+    this.running = false;
+    this.abort.abort();
+    await this.loop;
+  }
+
+  // Messages are handled one at a time on purpose: in parallel, a duplicate
+  // inside one batch would pass the idempotency check twice. The worst case for
+  // a batch is therefore 10 x the breaker timeout, which is why the queue's
+  // visibility timeout has to stay well above 30s.
+  private async poll(): Promise<void> {
     while (this.running) {
       try {
         const result = await this.client.send(
@@ -46,26 +71,24 @@ export class OrderSQSConsumer {
             MaxNumberOfMessages: 10,
             WaitTimeSeconds: 20,
             MessageAttributeNames: ['All'],
-          })
+          }),
+          { abortSignal: this.abort.signal }
         );
 
         if (result.Messages?.length) {
           logger.debug({ count: result.Messages.length }, 'Messages received');
 
           for (const message of result.Messages) {
+            if (!this.running) break;
             await this.handleMessage(message);
           }
         }
       } catch (error) {
+        if (!this.running) break;
         logger.error({ error }, 'Error receiving messages');
         await this.sleep(5000);
       }
     }
-  }
-
-  /** Stops the polling loop after the current iteration. */
-  stop(): void {
-    this.running = false;
   }
 
   /**
@@ -121,7 +144,18 @@ export class OrderSQSConsumer {
     }
   }
 
+  /** Resolves early on stop(), so shutdown never waits out the error backoff. */
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      this.abort.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true }
+      );
+    });
   }
 }

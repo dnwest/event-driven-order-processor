@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   SQSClient,
   DeleteMessageCommand,
+  ReceiveMessageCommand,
   Message,
 } from '@aws-sdk/client-sqs';
 import { OrderSQSConsumer } from './sqs.consumer.js';
@@ -124,5 +125,83 @@ describe('OrderSQSConsumer.handleMessage', () => {
       consumer.handleMessage({ MessageId: 'x', Body: 'not json' })
     ).resolves.toBeUndefined();
     expect(deleteCalls(send)).toHaveLength(0);
+  });
+});
+
+describe('OrderSQSConsumer shutdown', () => {
+  const receiveCalls = (send: ReturnType<typeof vi.fn>) =>
+    send.mock.calls.filter(([cmd]) => cmd instanceof ReceiveMessageCommand);
+
+  /** A long poll that only ends when the caller aborts it, like the real one. */
+  const longPoll = (_cmd: unknown, options?: { abortSignal?: AbortSignal }) =>
+    new Promise((_resolve, reject) => {
+      options?.abortSignal?.addEventListener('abort', () =>
+        reject(new DOMException('Aborted', 'AbortError'))
+      );
+    });
+
+  it('aborts the in-progress long poll instead of waiting it out', async () => {
+    const send = vi.fn(longPoll);
+    const consumer = new OrderSQSConsumer({
+      client: { send } as unknown as SQSClient,
+      handler: vi.fn(),
+      queueUrl: 'q',
+    });
+
+    const started = consumer.start();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+    await consumer.stop();
+    await started;
+
+    expect(receiveCalls(send)).toHaveLength(1);
+  });
+
+  it('finishes the in-flight message and leaves the rest of the batch', async () => {
+    let finishHandler!: () => void;
+    const handler = vi.fn(() => new Promise<void>((r) => (finishHandler = r)));
+    const batch = [sqsMessage(validOrder()), sqsMessage(validOrder())];
+    const send = vi.fn(async (cmd: unknown) =>
+      cmd instanceof ReceiveMessageCommand ? { Messages: batch } : {}
+    );
+    const consumer = new OrderSQSConsumer({
+      client: { send } as unknown as SQSClient,
+      handler,
+      queueUrl: 'q',
+    });
+
+    void consumer.start();
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+
+    const stopped = consumer.stop();
+    finishHandler();
+    await stopped;
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(deleteCalls(send)).toHaveLength(1);
+    expect(receiveCalls(send)).toHaveLength(1);
+  });
+
+  it('does not sit out the error backoff when stopped', async () => {
+    const send = vi.fn().mockRejectedValue(new Error('sqs down'));
+    const consumer = new OrderSQSConsumer({
+      client: { send } as unknown as SQSClient,
+      handler: vi.fn(),
+      queueUrl: 'q',
+    });
+
+    void consumer.start();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+
+    const before = Date.now();
+    await consumer.stop();
+
+    expect(Date.now() - before).toBeLessThan(1_000);
+  });
+
+  it('resolves stop() when the consumer never started', async () => {
+    const { client } = makeClient();
+    const consumer = new OrderSQSConsumer({ client, handler: vi.fn(), queueUrl: 'q' });
+
+    await expect(consumer.stop()).resolves.toBeUndefined();
   });
 });

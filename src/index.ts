@@ -9,6 +9,7 @@ import {
 } from './infrastructure/idempotency/order-idempotency.js';
 import { RedisIdempotencyStore } from './infrastructure/idempotency/redis-idempotency-store.js';
 import { createRedisClient } from './infrastructure/idempotency/redis.client.js';
+import { createShutdown } from './infrastructure/lifecycle/graceful-shutdown.js';
 import { logger } from './infrastructure/observability/logger.js';
 import { createPrometheusMetrics } from './infrastructure/observability/metrics.js';
 import { startMetricsServer } from './infrastructure/observability/metrics.server.js';
@@ -36,13 +37,10 @@ const { handler: guarded } = withCircuitBreaker(
     onReject: () => metrics.circuitRejected(),
   }
 );
-const store: IdempotencyStore =
-  env.IDEMPOTENCY_STORE === 'redis'
-    ? new RedisIdempotencyStore({
-        client: createRedisClient(env.REDIS_URL),
-        ttlSeconds: env.IDEMPOTENCY_TTL_SECONDS,
-      })
-    : new InMemoryIdempotencyStore();
+const redis = env.IDEMPOTENCY_STORE === 'redis' ? createRedisClient(env.REDIS_URL) : null;
+const store: IdempotencyStore = redis
+  ? new RedisIdempotencyStore({ client: redis, ttlSeconds: env.IDEMPOTENCY_TTL_SECONDS })
+  : new InMemoryIdempotencyStore();
 
 logger.info({ store: env.IDEMPOTENCY_STORE }, 'Idempotency store selected');
 
@@ -52,7 +50,7 @@ const handler = withIdempotency(guarded, store, {
 
 const consumer = new OrderSQSConsumer({ handler, metrics });
 
-startMetricsServer({ registry, port: env.METRICS_PORT });
+const metricsServer = startMetricsServer({ registry, port: env.METRICS_PORT });
 const queueDepth = startQueueDepthPoller({
   client: sqsClient,
   metrics,
@@ -64,6 +62,24 @@ const queueDepth = startQueueDepthPoller({
 });
 // Seed the gauges now, so a scrape before the first tick is not empty.
 void queueDepth.poll();
+
+// The consumer goes first: Redis has to outlive the last in-flight message, and
+// the metrics stay scrapable until the work is done.
+const shutdown = createShutdown({
+  timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+  steps: [
+    { name: 'consumer', run: () => consumer.stop() },
+    { name: 'queue-depth', run: () => queueDepth.stop() },
+    {
+      name: 'metrics-server',
+      run: () => new Promise<void>((resolve) => metricsServer.close(() => resolve())),
+    },
+    { name: 'redis', run: async () => void (await redis?.quit()) },
+  ],
+});
+
+process.on('SIGTERM', (signal) => void shutdown(signal));
+process.on('SIGINT', (signal) => void shutdown(signal));
 
 logger.info('Starting Event-Driven Order Processor Worker');
 
