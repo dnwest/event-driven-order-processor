@@ -1,6 +1,6 @@
 # 📨 Event-Driven Order Processor
 
-> An asynchronous order-processing worker built around the failure modes of event-driven systems: SNS fan-out and SQS consumption, guarded by a circuit breaker, retries with backoff, idempotent consumption and a Dead Letter Queue — provisioned with Terraform and instrumented with Prometheus.
+> An asynchronous order-processing worker built around the failure modes of event-driven systems: SNS fan-out and SQS consumption, guarded by a circuit breaker, retries with backoff, idempotent consumption and a Dead Letter Queue, provisioned with Terraform and instrumented with Prometheus.
 
 [![CI](https://github.com/dnwest/event-driven-order-processor/actions/workflows/ci.yml/badge.svg)](https://github.com/dnwest/event-driven-order-processor/actions/workflows/ci.yml)
 ![Node.js](https://img.shields.io/badge/Node.js-20.x-green?style=for-the-badge&logo=node.js)
@@ -13,7 +13,7 @@
 
 In high-volume distributed systems, processing complex workflows (like order creation, payment, and inventory updates) synchronously via HTTP can lead to bottlenecks, timeouts, and data loss.
 
-This project demonstrates a **decoupled, asynchronous approach** where the core API simply publishes an event, and dedicated background workers process the workload at their own pace, ensuring zero data loss even during database outages.
+This project demonstrates a **decoupled, asynchronous approach** where the core API simply publishes an event, and dedicated background workers process the workload at their own pace. A database outage delays orders instead of dropping them: failed messages stay on the queue and, after three receives, move to a Dead Letter Queue that holds them for up to 14 days.
 
 ## 🏗️ Architecture Topology
 
@@ -35,11 +35,13 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Idempotent Consumption:** SQS delivery is *at-least-once*, so the same order can arrive twice. Each `orderId` is recorded **after** it is successfully processed; a re-delivered duplicate is skipped as a logged no-op (and still acknowledged, removing it from the queue). Failed orders are left unrecorded so a retry reprocesses them. In-memory by default, or Redis-backed so the dedupe holds across scaled-out workers.
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
+- **Visibility Timeout sized to the batch:** Messages are handled one at a time, so a batch of 10 can take 30s at the 3s breaker timeout. The 60s visibility timeout keeps SQS from redelivering a message the worker has not reached yet.
+- **Graceful Shutdown:** On `SIGTERM` or `SIGINT` the worker aborts the long poll, finishes the message in flight, then closes the metrics server and Redis. The rest of the batch is left for SQS to redeliver, and `SHUTDOWN_TIMEOUT_MS` bounds the whole sequence.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
 - **Infrastructure as Code:** The whole topology — topic, queue, DLQ, redrive, encryption, IAM — is declared in Terraform (`infra/terraform`) and applied to LocalStack. The same code targets real AWS by clearing one variable.
 - **Remote Terraform state:** State lives in an S3 bucket with **S3-native locking** (`use_lockfile`, no DynamoDB table), so concurrent runs can't corrupt it. The state bucket is bootstrapped before `init`, since a backend bucket can't be managed by the state it holds. LocalStack vs. real AWS is a `-backend-config` file, mirroring how the provider is switched.
 - **Encryption at rest:** A customer-managed KMS key (with rotation) encrypts the topic and both queues; its key policy grants SNS only the `GenerateDataKey`/`Decrypt` it needs for fan-out.
-- **Least-privilege IAM:** Separate publisher and consumer policies — the producer cannot read the queue, the worker cannot publish, and the DLQ is read-only for inspection.
+- **Least-privilege IAM:** Separate publisher and consumer policies: the producer cannot read the queue, the worker cannot publish, and the DLQ is read-only for inspection.
 - **Structured Logging:** Pino is used for high-performance, JSON-formatted observability.
 - **Operational Metrics:** Prometheus counters and gauges on `/metrics` — throughput, failures split by cause, retries, breaker state, and queue/DLQ depth — with documented alert thresholds.
 
@@ -51,7 +53,7 @@ This project uses **LocalStack** to emulate AWS services locally. No AWS account
 
 This spins up a local AWS environment, creates the S3 bucket that holds the
 Terraform state, then `init`s against it and applies the Terraform in
-`infra/terraform` — the KMS key, SNS Topic, SQS Queue, DLQ, and IAM policies.
+`infra/terraform`: the KMS key, SNS Topic, SQS Queue, DLQ, and IAM policies.
 
 ```bash
 pnpm run infra:up
@@ -124,7 +126,7 @@ IDEMPOTENCY_STORE=redis pnpm run dev:worker
 `docker compose up -d` already provides Redis (set `REDIS_PORT` if 6379 is taken
 locally). Keys are namespaced `order:processed:<orderId>` and expire after
 `IDEMPOTENCY_TTL_SECONDS`, which only has to outlive the window in which SQS can
-still redeliver — so the set does not grow forever.
+still redeliver, so the set does not grow forever.
 
 Two honest limits. If Redis is unreachable the handler rejects and the message
 goes back to the queue rather than being processed undeduplicated: better a
@@ -132,7 +134,7 @@ delayed order, or one parked in the DLQ for replay, than a customer charged
 twice. And because an order is recorded *after* it succeeds, two truly
 simultaneous deliveries of the same `orderId` can both pass the check before
 either is recorded. Closing that window needs an atomic reservation *before*
-processing, which trades this risk for a worse one — an order lost if the worker
+processing, which trades this risk for a worse one, an order lost if the worker
 dies mid-flight.
 
 ## 🧪 Testing
@@ -154,7 +156,7 @@ pnpm run typecheck   # tsc --noEmit
 
 CI (`.github/workflows/ci.yml`) runs `typecheck` + `lint` + `test` on every push
 and pull request, and a second job runs `terraform fmt -check` + `validate` so the
-infrastructure is gated the same way the code is — no AWS credentials needed.
+infrastructure is gated the same way the code is, no AWS credentials needed.
 
 Linting is [ESLint](https://eslint.org) with
 [typescript-eslint](https://typescript-eslint.io) (flat config in
@@ -178,7 +180,8 @@ pnpm run dev:publish 1500
 ```
 
 Watch the Worker retry each delivery in-process with backoff; after
-`maxReceiveCount=3` SQS receives, the message is moved to the DLQ.
+`maxReceiveCount=3` SQS receives, the message is moved to the DLQ. Each redelivery
+waits out the 60s visibility timeout, so this takes about three minutes.
 
 ### Inspecting the DLQ
 
@@ -209,7 +212,7 @@ curl -s localhost:9464/metrics | grep ^orders_
 
 | Metric                              | Type      | What it answers                                    |
 | ----------------------------------- | --------- | -------------------------------------------------- |
-| `orders_processed_total`            | counter   | Messages acknowledged — *includes* duplicates skipped |
+| `orders_processed_total`            | counter   | Messages acknowledged, *including* duplicates skipped |
 | `orders_failed_total{reason}`       | counter   | Failures, split into `validation` and `downstream`  |
 | `orders_retry_total`                | counter   | In-process retries absorbed before SQS redelivery   |
 | `orders_duplicate_total`            | counter   | Re-deliveries skipped by the idempotency layer      |
@@ -224,21 +227,21 @@ message will *never* succeed and is heading for the DLQ, while `downstream` is
 expected to recover. One page, the other does not.
 
 A skipped duplicate is acknowledged like any handled message, so it counts in
-`orders_processed_total` too — real throughput is that minus
+`orders_processed_total` too, so real throughput is that minus
 `orders_duplicate_total`.
 
 ### Alert thresholds
 
 | Alert                | Condition                                                | Why                                                                     |
 | -------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
-| **DLQ not empty**    | `orders_queue_messages_visible{queue="dlq"} > 0` for 5m   | Every DLQ message is an order that never processed — always human-owned. |
+| **DLQ not empty**    | `orders_queue_messages_visible{queue="dlq"} > 0` for 5m   | Every DLQ message is an order that never processed, always human-owned. |
 | **Backlog growing**  | `orders_queue_messages_visible{queue="main"} > 1000` for 10m | Consumers cannot keep up; scale out or investigate the downstream.    |
 | **Breaker open**     | `orders_circuit_state == 2` for 2m                        | The dependency is down; a brief trip is by design, a sustained one is not. |
-| **Validation spike** | `rate(orders_failed_total{reason="validation"}[5m]) > 0`  | A producer is emitting events this consumer cannot read — a contract break. |
+| **Validation spike** | `rate(orders_failed_total{reason="validation"}[5m]) > 0`  | A producer is emitting events this consumer cannot read, a contract break. |
 | **Worker stalled**   | `rate(orders_processed_total[15m]) == 0` with backlog > 0 | Messages are waiting and nothing is moving.                             |
 
 Thresholds are stated as *sustained* levels because `ApproximateNumberOfMessages`
-is eventually consistent — a single reading is not enough to page someone.
+is eventually consistent, so a single reading is not enough to page someone.
 
 ## 📁 Project Structure
 
@@ -265,13 +268,14 @@ src/
 ├── infrastructure/          # External integrations
 │   ├── aws/                 # SQS and SNS clients & publishers
 │   ├── idempotency/         # Dedupe decorator + in-memory and Redis stores (+ .spec.ts)
+│   ├── lifecycle/           # Graceful shutdown on SIGTERM/SIGINT (+ .spec.ts)
 │   ├── observability/       # Pino logging, Prometheus metrics, queue-depth poller
 │   └── resilience/          # Circuit breaker and retry/backoff (+ .spec.ts)
 ├── presentation/            # Entrypoints
 │   └── sqs.consumer.ts      # The SQS polling engine (+ .spec.ts)
 ├── scripts/                 # Test producers
 │   └── publish-test-event.ts
-└── index.ts                 # Worker bootstrap — composes every layer
+└── index.ts                 # Worker bootstrap, composes every layer
 
 Tests are co-located as `*.spec.ts` next to the code they cover.
 ```
@@ -294,6 +298,7 @@ The following environment variables are used (with defaults for local developmen
 | `IDEMPOTENCY_STORE` | `memory`                                             | `memory` or `redis` |
 | `REDIS_URL`     | `redis://localhost:6379`                                 | Used when the store is `redis` |
 | `IDEMPOTENCY_TTL_SECONDS` | `86400`                                        | How long an `orderId` is remembered |
+| `SHUTDOWN_TIMEOUT_MS` | `10000`                                            | Limit on graceful shutdown before a forced exit |
 
 The defaults match what `pnpm run infra:up` provisions; `pnpm run infra:output`
 prints the live values for any other environment.
@@ -316,7 +321,7 @@ prints the live values for any other environment.
 
 ### `infra:up` fails to start a container?
 
-Another local project may already hold a port. Redis is the usual one — start it
+Another local project may already hold a port. Redis is the usual one, so start it
 elsewhere with `REDIS_PORT=6380 pnpm run infra:up` and set `REDIS_URL` to match.
 
 ### Metrics endpoint empty or unreachable?
