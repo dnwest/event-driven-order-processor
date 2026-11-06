@@ -35,6 +35,35 @@ jobs:
       - name: Test
         run: pnpm test
 
+  integration:
+    name: integration (LocalStack)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Provision the topology
+        run: pnpm run infra:up
+
+      - name: Integration tests
+        run: pnpm test:integration
+
   terraform:
     name: terraform fmt + validate
     runs-on: ubuntu-latest

@@ -51,6 +51,11 @@ export class OrderSQSConsumer {
    * The long poll is aborted, but the message being handled runs to completion,
    * delete included. The rest of its batch is left alone and SQS makes it
    * visible again after the visibility timeout.
+   *
+   * Aborting only drops the client side of the poll: on LocalStack the request
+   * stays open on the server and can still claim a message, which then returns
+   * after the visibility timeout with one receive spent. Waiting the poll out
+   * would not avoid that, since whatever it returned would be left unhandled.
    */
   async stop(): Promise<void> {
     this.running = false;
