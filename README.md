@@ -36,7 +36,7 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Dead Letter Queue (DLQ):** Messages that fail 3 times are automatically routed via **RedrivePolicy** to a separate queue (`orders-dlq`) for inspection.
 - **Long Polling:** Optimized SQS consumption (WaitTimeSeconds=20) to reduce API calls and AWS costs.
 - **Visibility Timeout sized to the batch:** Messages are handled one at a time, so a batch of 10 can take 30s at the 3s breaker timeout. The 60s visibility timeout keeps SQS from redelivering a message the worker has not reached yet.
-- **Graceful Shutdown:** On `SIGTERM` or `SIGINT` the worker aborts the long poll, finishes the message in flight, then closes the metrics server and Redis. The rest of the batch is left for SQS to redeliver, and `SHUTDOWN_TIMEOUT_MS` bounds the whole sequence.
+- **Graceful Shutdown:** On `SIGTERM` or `SIGINT` the worker aborts the long poll, finishes the message in flight, then closes the metrics server and Redis. The rest of the batch is left for SQS to redeliver, and `SHUTDOWN_TIMEOUT_MS` bounds the whole sequence. An aborted poll can still claim a message on the server (observed on LocalStack), which returns after the visibility timeout with one receive spent.
 - **Fail-Fast Validation:** Zod schemas ensure only valid domain entities are processed.
 - **Infrastructure as Code:** The whole topology — topic, queue, DLQ, redrive, encryption, IAM — is declared in Terraform (`infra/terraform`) and applied to LocalStack. The same code targets real AWS by clearing one variable.
 - **Remote Terraform state:** State lives in an S3 bucket with **S3-native locking** (`use_lockfile`, no DynamoDB table), so concurrent runs can't corrupt it. The state bucket is bootstrapped before `init`, since a backend bucket can't be managed by the state it holds. LocalStack vs. real AWS is a `-backend-config` file, mirroring how the provider is switched.
@@ -154,9 +154,28 @@ pnpm run test:watch  # watch mode
 pnpm run typecheck   # tsc --noEmit
 ```
 
+### Integration tests
+
+These run the real stack against the topology Terraform provisions on LocalStack:
+SNS fan-out, delete on success, redrive to the DLQ after three receives, a malformed
+payload reaching the DLQ without touching the handler, dedupe of a re-published
+order, and stopping during a live long poll.
+
+```bash
+pnpm run infra:up
+pnpm test:integration
+```
+
+The suite first asserts the provisioned 60s visibility timeout and redrive policy,
+then lowers the timeout for the run so three redeliveries take seconds. It is
+restored afterwards.
+
+### CI
+
 CI (`.github/workflows/ci.yml`) runs `typecheck` + `lint` + `test` on every push
-and pull request, and a second job runs `terraform fmt -check` + `validate` so the
-infrastructure is gated the same way the code is, no AWS credentials needed.
+and pull request. A second job provisions LocalStack and runs the integration
+tests, and a third runs `terraform fmt -check` + `validate` so the infrastructure
+is gated the same way the code is, no AWS credentials needed.
 
 Linting is [ESLint](https://eslint.org) with
 [typescript-eslint](https://typescript-eslint.io) (flat config in
@@ -277,7 +296,8 @@ src/
 │   └── publish-test-event.ts
 └── index.ts                 # Worker bootstrap, composes every layer
 
-Tests are co-located as `*.spec.ts` next to the code they cover.
+Unit tests are co-located as `*.spec.ts` next to the code they cover. Integration
+tests live in `test/integration/`.
 ```
 
 ## ⚙️ Environment Variables
