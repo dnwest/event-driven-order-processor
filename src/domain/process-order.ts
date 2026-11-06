@@ -4,8 +4,8 @@ import type { OrderEvent } from './order.schema.js';
 /**
  * Port for the downstream business step (the "save to database" box in the
  * architecture diagram). Kept as an injectable function so the consumer can be
- * unit-tested without a real dependency, and so the Circuit Breaker / retry
- * work on the roadmap can wrap this seam.
+ * unit-tested without a real dependency, and so the circuit breaker and retry
+ * layers can wrap this seam.
  */
 export type OrderHandler = (order: OrderEvent) => Promise<void>;
 

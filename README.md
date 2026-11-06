@@ -43,26 +43,6 @@ The system implements a **Pub/Sub (Fan-out)** pattern combined with a **Message 
 - **Structured Logging:** Pino is used for high-performance, JSON-formatted observability.
 - **Operational Metrics:** Prometheus counters and gauges on `/metrics` — throughput, failures split by cause, retries, breaker state, and queue/DLQ depth — with documented alert thresholds.
 
-## 🗺️ Roadmap
-
-A snapshot of the current stage. Checked items are implemented and verifiable in
-this repo — each has tests, a runbook, or both. The unchecked ones are deliberate
-scope, kept visible with the reason they were left out rather than quietly
-dropped.
-
-- [x] **Event-driven pipeline** — SNS fan-out → long-polling SQS consumer with fail-fast Zod validation.
-- [x] **Dead Letter Queue** — `RedrivePolicy` (`maxReceiveCount=3`) routes poison messages to `orders-dlq`.
-- [x] **Circuit Breaker** — opossum around the downstream call; opens on repeated failures so the worker fails fast.
-- [x] **Retry with backoff** — transient downstream failures are retried in-process with exponential backoff + jitter before the message returns to SQS.
-- [x] **Idempotent consumption** — re-delivered `orderId`s are deduped for at-least-once safety.
-- [x] **Structured logging** — JSON logs via Pino.
-- [x] **Unit tests + CI** — Vitest suite gated by GitHub Actions (typecheck + lint + tests).
-- [x] **Infrastructure as Code** — Terraform for SNS/SQS/DLQ with least-privilege IAM and encryption at rest (KMS).
-- [x] **Operational metrics & alerting** — Prometheus metrics on `/metrics` with documented alert thresholds.
-- [x] **Redis-backed idempotency store** — dedupe shared across worker instances, behind the same `IdempotencyStore` interface.
-- [x] **Remote Terraform state** — S3 backend with S3-native locking (`use_lockfile`), verified against LocalStack so a team can share state safely.
-- [ ] **Private networking** — VPC endpoints for SQS/SNS. Left out because LocalStack only mocks them, so the config could not be verified here; claiming it would be dishonest.
-
 ## 🚀 How to Run Locally
 
 This project uses **LocalStack** to emulate AWS services locally. No AWS account or credit card is required.
@@ -127,6 +107,9 @@ real AWS instead of the emulator:
 ./scripts/terraform.sh init -reconfigure -backend-config=backend/aws.s3.tfbackend
 ./scripts/terraform.sh apply -var 'localstack_endpoint='
 ```
+
+VPC endpoints for SQS/SNS are not included: LocalStack only mocks them, so the
+configuration could not be verified here.
 
 ### Running more than one worker
 
