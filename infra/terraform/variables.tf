@@ -23,9 +23,9 @@ variable "max_receive_count" {
 }
 
 variable "visibility_timeout_seconds" {
-  description = "Time a received message stays invisible to other consumers."
+  description = "Time a received message stays invisible to other consumers. Must exceed a full batch handled sequentially: 10 messages x the 3s breaker timeout."
   type        = number
-  default     = 30
+  default     = 60
 }
 
 variable "message_retention_seconds" {
